@@ -1,0 +1,165 @@
+name: Build Llama Server with CUDA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main # or your preferred branch
+  schedule:
+    - cron: '0 0 * * *' # Run daily at midnight UTC
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      current_llama_sha: ${{ steps.get_sha.outputs.current_sha }}
+      build_successful: ${{ steps.configure_and_build.outcome == 'success' && steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha }}
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Delete Previous Releases and Tags
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        echo "Deleting previous releases and tags..."
+        gh release list --limit 100 --json tagName --jq '.[].tagName' | while read -r tag; do
+          if [[ "$tag" == llama-server-* ]]; then
+            echo "Deleting release $tag..."
+            gh release delete "$tag" --yes
+            
+            echo "Deleting tag $tag..."
+            git push --delete origin "$tag"
+          fi
+        done
+    - name: Start Workflow Logging
+      run: echo "Starting GitHub Actions workflow for Llama Server build."
+
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    - name: Cache llama.cpp repository
+      uses: actions/cache@v4
+      with:
+        path: llama.cpp
+        key: ${{ runner.os }}-llama-cpp-${{ hashFiles('llama.cpp/CMakeLists.txt', 'llama.cpp/src/**/*.cpp', 'llama.cpp/src/**/*.h') }}
+        restore-keys: |
+          ${{ runner.os }}-llama-cpp-
+
+    - name: Cache llama.cpp build directory
+      uses: actions/cache@v4
+      with:
+        path: llama.cpp/build
+        key: ${{ runner.os }}-llama-cpp-build-${{ hashFiles('llama.cpp/CMakeLists.txt', 'llama.cpp/src/**/*.cpp', 'llama.cpp/src/**/*.h') }}
+        restore-keys: |
+          ${{ runner.os }}-llama-cpp-build-
+
+    - uses: Jimver/cuda-toolkit@v0.2.24
+      id: cuda-toolkit
+      with:
+        method: 'network'
+
+    - name: Log CUDA Setup Complete
+      run: echo "CUDA Toolkit setup complete. Proceeding with llama.cpp."
+
+    - name: Download Last Compiled SHA
+      uses: actions/download-artifact@v4
+      with:
+        name: last-compiled-llama-cpp-sha
+        path: ./.github/last_sha
+      continue-on-error: true # Allow workflow to continue if artifact doesn't exist yet
+
+    - name: Clone llama.cpp
+      run: |
+        echo "Cloning llama.cpp repository..."
+        git clone https://github.com/ggerganov/llama.cpp.git
+        cd llama.cpp
+
+    - name: Get Last Compiled SHA from Artifact
+      id: get_last_sha
+      run: |
+        if [ -f ./.github/last_sha/sha.txt ]; then
+          echo "last_sha=$(cat ./.github/last_sha/sha.txt)" >> "$GITHUB_OUTPUT"
+        else
+          echo "last_sha=" >> "$GITHUB_OUTPUT" # Set to empty if file doesn't exist
+        fi
+
+    - name: Get Current llama.cpp SHA
+      id: get_sha
+      run: |
+        cd llama.cpp
+        echo "current_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+    - name: Install CURL Development Libraries
+      run: |
+        echo "Installing CURL development libraries..."
+        sudo apt-get update
+        sudo apt-get install -y libcurl4-openssl-dev
+
+    - name: Configure and Build llama-server
+      id: configure_and_build
+      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
+      run: |
+        echo "Configuring and building llama-server..."
+        cd llama.cpp
+        cmake . -B ./build -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=ON -DLLAMA_CURL=ON -DCMAKE_CUDA_ARCHITECTURES="75;80;89"
+        cmake --build ./build --config Release -j $(nproc) --target llama-server
+        echo "llama-server build complete."
+
+    - name: Move llama-server Binary
+      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
+      run: |
+        echo "Moving llama-server binary..."
+        mv llama.cpp/build/bin/llama-server llama-server
+        echo "llama-server binary moved to root directory."
+
+    - name: Upload llama-server Artifact
+      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
+      uses: actions/upload-artifact@v4
+      with:
+        name: llama-server-binary
+        path: llama-server
+    - name: Log Artifact Upload Complete
+      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
+      run: echo "llama-server binary uploaded as artifact."
+
+    - name: Store Last Compiled SHA
+      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
+      run: |
+        mkdir -p ./.github/last_sha
+        echo "${{ steps.get_sha.outputs.current_sha }}" > ./.github/last_sha/sha.txt
+
+    - name: Upload Last Compiled SHA Artifact
+      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
+      uses: actions/upload-artifact@v4
+      with:
+        name: last-compiled-llama-cpp-sha
+        path: ./.github/last_sha/sha.txt
+
+  release:
+    needs: build
+    if: needs.build.outputs.build_successful == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download llama-server Binary
+        uses: actions/download-artifact@v4
+        with:
+          name: llama-server-binary
+          path: .
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: llama-server-${{ needs.build.outputs.current_llama_sha }}
+          name: Llama Server Build ${{ needs.build.outputs.current_llama_sha }}
+          body: |
+            Automated build of llama-server from llama.cpp commit:
+            https://github.com/ggerganov/llama.cpp/commit/${{ needs.build.outputs.current_llama_sha }}
+          files: |
+            llama-server
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
