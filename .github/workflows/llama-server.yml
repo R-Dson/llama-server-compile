@@ -20,21 +20,6 @@ jobs:
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
-
-    - name: Delete Previous Releases and Tags
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        echo "Deleting previous releases and tags..."
-        gh release list --limit 100 --json tagName --jq '.[].tagName' | while read -r tag; do
-          if [[ "$tag" == llama-server-* ]]; then
-            echo "Deleting release $tag..."
-            gh release delete "$tag" --yes
-            
-            echo "Deleting tag $tag..."
-            git push --delete origin "$tag"
-          fi
-        done
     - name: Start Workflow Logging
       run: echo "Starting GitHub Actions workflow for Llama Server build."
 
@@ -145,6 +130,24 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Delete Previous Releases and Tags
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Deleting previous releases and tags..."
+          gh release list --limit 100 --json tagName --jq '.[].tagName' | while read -r tag; do
+            if [[ "$tag" == llama-server-* ]]; then
+              echo "Deleting release $tag..."
+              gh release delete "$tag" --yes
+              
+              echo "Deleting tag $tag..."
+              git push --delete origin "$tag"
+            fi
+          done
+
       - name: Download llama-server Binary
         uses: actions/download-artifact@v4
         with:
