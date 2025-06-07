@@ -56,11 +56,18 @@ jobs:
         path: ./.github/last_sha
       continue-on-error: true # Allow workflow to continue if artifact doesn't exist yet
 
-    - name: Clone llama.cpp
+    - name: Clone or Update llama.cpp
       run: |
-        echo "Cloning llama.cpp repository..."
-        git clone https://github.com/ggerganov/llama.cpp.git
-        cd llama.cpp
+        echo "Cloning or updating llama.cpp repository..."
+        if [ -d "llama.cpp/.git" ]; then
+          echo "Repository already exists. Pulling latest changes..."
+          cd llama.cpp
+          git pull
+        else
+          echo "Cloning repository..."
+          git clone https://github.com/ggerganov/llama.cpp.git
+          cd llama.cpp
+        fi
 
     - name: Get Last Compiled SHA from Artifact
       id: get_last_sha
