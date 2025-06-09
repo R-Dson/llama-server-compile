@@ -6,7 +6,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 0 * * *'
 
 jobs:
   prepare:
@@ -104,13 +104,7 @@ jobs:
             dependencies: "brew install curl"
           - backend_name: ROCm
             os_runner: ubuntu-22.04
-            cmake_flags: >-
-              -DGGML_HIP=ON
-              -DAMDGPU_TARGETS="gfx1100;gfx1101;gfx1102" #'gfx900;gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102'
-              -DLLAMA_AVX=ON
-              -DLLAMA_AVX2=ON
-              -DLLAMA_FMA=ON
-              -DLLAMA_F16C=ON            
+            cmake_flags: "-DGGML_HIP=ON -DAMDGPU_TARGETS='gfx1103' # 'gfx900;gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103'"
             artifact_name_suffix: "rocm-linux-x86_64"
             setup_rocm: true
             rocm_version: "latest" 
@@ -355,16 +349,10 @@ jobs:
         path: binaries_for_upload/llama-server-${{ matrix.config.artifact_name_suffix }}
         if-no-files-found: error
 
-        
   publish_release:
     name: Publish GitHub Release
-    needs: [prepare, build] # Still needs build to complete (or fail)
-    # This condition ensures it runs if:
-    # 1. The 'prepare' job succeeded.
-    # 2. The 'prepare' job decided a build should happen.
-    # 3. The 'publish_release' job itself wasn't cancelled.
-    # This will run even if the 'build' job has partial failures in its matrix.
-    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.should_build == 'true'
+    needs: [prepare, build]
+    if: success() && needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -377,7 +365,6 @@ jobs:
           echo "Current SHA for release: ${{ needs.prepare.outputs.current_sha }}"
           echo "Tag Name: ${{ needs.prepare.outputs.tag_name }}"
           echo "Release Name: ${{ needs.prepare.outputs.release_name }}"
-          echo "Build job overall result: ${{ needs.build.result }}" # For debugging
 
       - name: Clean up old releases (optional)
         env:
@@ -396,10 +383,7 @@ jobs:
       - name: Download all llama-server artifacts
         uses: actions/download-artifact@v4
         with:
-          path: release-assets/
-        # download-artifact will download all artifacts that were successfully uploaded.
-        # If a build matrix job failed, its artifact wouldn't have been uploaded,
-        # so it simply won't be downloaded here. This is the desired behavior.
+          path: release-assets/ 
 
       - name: Prepare Release Assets
         id: prep_assets
@@ -407,10 +391,8 @@ jobs:
           echo "Listing downloaded artifacts structure:"
           ls -R release-assets/
           mkdir -p final-release-assets
-
-          # Find all files that look like our artifacts and copy them
-          # The find command will only find artifacts that were successfully downloaded.
-          find release-assets -type f -name 'llama-server-*' -print -exec cp {} final-release-assets/ \;
+          
+          find release-assets -type f -path '*/llama-server-*' -print -exec cp {} final-release-assets/ \;
 
           echo "Listing final assets in final-release-assets/:"
           ls -l final-release-assets/
@@ -433,20 +415,19 @@ jobs:
             https://github.com/ggerganov/llama.cpp/commit/${{ needs.prepare.outputs.current_sha }}
 
             Compiled llama-server binaries for various backends are attached.
-            **Note:** Some backends might have failed to build and will be missing from this release.
           files: |
             final-release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Store Last Released SHA (if release was successful and assets were found)
+      - name: Store Last Released SHA (if release was successful)
         if: steps.prep_assets.outputs.assets_found == 'true'
         run: |
           mkdir -p ./.github/last_sha
           echo "${{ needs.prepare.outputs.current_sha }}" > ./.github/last_sha/sha.txt
           echo "Stored ${{ needs.prepare.outputs.current_sha }} as last released SHA."
 
-      - name: Upload Last Released SHA Artifact (if release was successful and assets were found)
+      - name: Upload Last Released SHA Artifact (if release was successful)
         if: steps.prep_assets.outputs.assets_found == 'true'
         uses: actions/upload-artifact@v4
         with:
