@@ -1,175 +1,435 @@
-name: Build Llama Server with CUDA
+name: Build Llama Server Multi-Backend
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - main # or your preferred branch
+      - main
   schedule:
-    - cron: '0 0 * * *' # Run daily at midnight UTC
+    - cron: '0 2 * * *'
 
 jobs:
-  build:
+  prepare:
+    name: Prepare Build
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
     outputs:
-      current_llama_sha: ${{ steps.get_sha.outputs.current_sha }}
-      build_successful: ${{ steps.configure_and_build.outcome == 'success' && steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha }}
-
+      current_sha: ${{ steps.get_sha.outputs.sha }}
+      short_sha: ${{ steps.get_sha.outputs.short_sha }}
+      should_build: ${{ steps.final_build_decision.outputs.decision }}
+      tag_name: llama-server-${{ steps.get_sha.outputs.short_sha }}
+      release_name: Llama Server Build ${{ steps.get_sha.outputs.short_sha }}
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-    - name: Start Workflow Logging
-      run: echo "Starting GitHub Actions workflow for Llama Server build."
+      - name: Checkout Workflow Repository
+        uses: actions/checkout@v4
 
-    - name: Checkout Repository
+      - name: Download Last Released SHA
+        uses: actions/download-artifact@v4
+        with:
+          name: last-released-llama-cpp-sha
+          path: ./.github/last_sha
+        continue-on-error: true
+
+      - name: Get Last Released SHA from Artifact
+        id: get_last_sha
+        run: |
+          if [ -f ./.github/last_sha/sha.txt ]; then
+            echo "last_sha=$(cat ./.github/last_sha/sha.txt)" >> "$GITHUB_OUTPUT"
+            echo "Last released SHA found: $(cat ./.github/last_sha/sha.txt)"
+          else
+            echo "last_sha=initial" >> "$GITHUB_OUTPUT"
+            echo "No last released SHA found, will build."
+          fi
+
+      - name: Clone llama.cpp to get current SHA
+        id: get_sha
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git temp_llama_cpp
+          cd temp_llama_cpp
+          CURRENT_SHA=$(git rev-parse HEAD)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "Current llama.cpp SHA: $CURRENT_SHA (Short: $SHORT_SHA)"
+          echo "sha=$CURRENT_SHA" >> $GITHUB_OUTPUT
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          cd ..
+          rm -rf temp_llama_cpp
+
+      - name: Compare SHAs
+        id: compare_sha
+        run: |
+          echo "Current SHA: ${{ steps.get_sha.outputs.sha }}"
+          echo "Last Released SHA: ${{ steps.get_last_sha.outputs.last_sha }}"
+          if [ "${{ steps.get_sha.outputs.sha }}" != "${{ steps.get_last_sha.outputs.last_sha }}" ]; then
+            echo "SHAs are different. Build is indicated by SHA diff."
+            echo "build_due_to_sha_diff=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "SHAs are the same. No build indicated by SHA diff."
+            echo "build_due_to_sha_diff=false" >> "$GITHUB_OUTPUT"
+          fi
+      
+      - name: Determine Final Build Decision
+        id: final_build_decision
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "Manual dispatch detected, forcing build."
+            echo "decision=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.compare_sha.outputs.build_due_to_sha_diff }}" == "true" ]; then
+            echo "Build needed due to SHA difference."
+            echo "decision=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No build needed based on SHA or dispatch."
+            echo "decision=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build for ${{ matrix.config.backend_name }}
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ${{ matrix.config.os_runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - backend_name: CUDA
+            os_runner: ubuntu-22.04
+            cmake_flags: "-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES='75;80;89'"
+            artifact_name_suffix: "cuda-linux-x86_64"
+            setup_cuda: true
+            dependencies: "sudo apt-get update -y && sudo apt-get install -y libcurl4-openssl-dev"
+          - backend_name: Metal
+            os_runner: macos-14
+            cmake_flags: "-DGGML_METAL=ON"
+            artifact_name_suffix: "metal-macos-arm64"
+            dependencies: "brew install curl"
+          - backend_name: ROCm
+            os_runner: ubuntu-22.04
+            cmake_flags: "-DGGML_HIP=ON -DAMDGPU_TARGETS='gfx900;gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103'"
+            artifact_name_suffix: "rocm-linux-x86_64"
+            setup_rocm: true
+            rocm_version: "latest" 
+            rocm_packages: "rocm-hip-sdk rocm-cmake" 
+            dependencies: "sudo apt-get update -y && sudo apt-get install -y libcurl4-openssl-dev"
+
+          - backend_name: Vulkan
+            os_runner: ubuntu-22.04
+            cmake_flags: "-DGGML_VULKAN=ON"
+            artifact_name_suffix: "vulkan-linux-x86_64"
+            dependencies: |
+              sudo apt-get update -y
+              # Prerequisites for adding custom repositories and for the SDK
+              sudo apt-get install -y libcurl4-openssl-dev wget gpg ca-certificates apt-transport-https
+              
+              # Add LunarG Vulkan SDK repository
+              # (Using /usr/share/keyrings/ for the gpg key as per modern best practices)
+              wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo gpg --dearmor -o /usr/share/keyrings/lunarg-vulkan-keyring.gpg
+              echo "deb [signed-by=/usr/share/keyrings/lunarg-vulkan-keyring.gpg] https://packages.lunarg.com/vulkan/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list
+              
+              # Update package lists again after adding the new repository
+              sudo apt-get update -y
+              
+              # Install the full Vulkan SDK
+              # This will provide glslc, libvulkan-dev, libshaderc-dev, and other necessary tools/libs
+              sudo apt-get install -y vulkan-sdk
+    steps:
+    - name: Checkout Workflow Repository
       uses: actions/checkout@v4
-    - name: Cache llama.cpp repository
+
+    - name: Cache llama.cpp repository source
+      id: cache-llama-cpp-src
       uses: actions/cache@v4
       with:
         path: llama.cpp
-        key: ${{ runner.os }}-llama-cpp-${{ hashFiles('llama.cpp/CMakeLists.txt', 'llama.cpp/src/**/*.cpp', 'llama.cpp/src/**/*.h') }}
+        key: ${{ runner.os }}-llamacpp-src-${{ needs.prepare.outputs.current_sha }}
         restore-keys: |
-          ${{ runner.os }}-llama-cpp-
+          ${{ runner.os }}-llamacpp-src-
+
+    - name: Clone or Update llama.cpp
+      run: |
+        if [ ! -d "llama.cpp/.git" ]; then
+          echo "Cloning llama.cpp repository at SHA ${{ needs.prepare.outputs.current_sha }}..."
+          git clone https://github.com/ggerganov/llama.cpp.git
+          cd llama.cpp
+          git checkout ${{ needs.prepare.outputs.current_sha }}
+        else
+          echo "llama.cpp repository exists. Fetching and checking out SHA ${{ needs.prepare.outputs.current_sha }}..."
+          cd llama.cpp
+          git fetch origin --prune --no-tags
+          git checkout ${{ needs.prepare.outputs.current_sha }}
+        fi
+        echo "Current llama.cpp SHA in working directory: $(git rev-parse HEAD)"
 
     - name: Cache llama.cpp build directory
       uses: actions/cache@v4
       with:
         path: llama.cpp/build
-        key: ${{ runner.os }}-llama-cpp-build-${{ hashFiles('llama.cpp/CMakeLists.txt', 'llama.cpp/src/**/*.cpp', 'llama.cpp/src/**/*.h') }}
+        key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.config.backend_name }}-llamacpp-build-${{ needs.prepare.outputs.current_sha }}-${{ hashFiles('llama.cpp/CMakeLists.txt', 'llama.cpp/**/CMakeLists.txt', 'llama.cpp/src/**/*.c', 'llama.cpp/src/**/*.h', 'llama.cpp/src/**/*.cpp', 'llama.cpp/src/**/*.hpp', 'llama.cpp/src/**/*.cu', 'llama.cpp/src/**/*.hip', 'llama.cpp/ggml*.h', 'llama.cpp/ggml*.c') }}
         restore-keys: |
-          ${{ runner.os }}-llama-cpp-build-
+          ${{ runner.os }}-${{ runner.arch }}-${{ matrix.config.backend_name }}-llamacpp-build-${{ needs.prepare.outputs.current_sha }}-
 
-    - uses: Jimver/cuda-toolkit@v0.2.24
-      id: cuda-toolkit
+    - name: Install System Dependencies
+      if: matrix.config.dependencies
+      run: |
+        echo "Installing dependencies: ${{ matrix.config.dependencies }}"
+        set -ex
+        ${{ matrix.config.dependencies }}
+        echo "Dependency installation complete."
+
+    - name: Setup CUDA
+      if: matrix.config.setup_cuda
+      uses: Jimver/cuda-toolkit@v0.2.24
       with:
         method: 'network'
+        cuda: '12.1.0'
 
-    - name: Log CUDA Setup Complete
-      run: echo "CUDA Toolkit setup complete. Proceeding with llama.cpp."
+    - name: Verify CUDA Tools
+      if: matrix.config.setup_cuda
+      run: |
+        echo "Verifying CUDA tools..."
+        set -ex
+        which nvcc
+        nvcc --version
+        echo "CUDA setup verification complete."
 
-    - name: Download Last Compiled SHA
-      uses: actions/download-artifact@v4
+    - name: Setup ROCm using loostrum/rocm-installer
+      if: matrix.config.setup_rocm
+      uses: loostrum/rocm-installer@v0.2
       with:
-        name: last-compiled-llama-cpp-sha
-        path: ./.github/last_sha
-      continue-on-error: true # Allow workflow to continue if artifact doesn't exist yet
+        version: ${{ matrix.config.rocm_version }}
+        packages: ${{ matrix.config.rocm_packages }}
+        # usecase: can also be used, e.g., 'rocmdev' or 'hipsdk'
 
-    - name: Clone or Update llama.cpp
+    - name: Verify ROCm Tools (after loostrum/rocm-installer)
+      if: matrix.config.setup_rocm
       run: |
-        echo "Cloning or updating llama.cpp repository..."
-        if [ -d "llama.cpp/.git" ]; then
-          echo "Repository already exists. Pulling latest changes..."
-          cd llama.cpp
-          git pull
-        else
-          echo "Cloning repository..."
-          git clone https://github.com/ggerganov/llama.cpp.git
-          cd llama.cpp
+        echo "Verifying ROCm tools..."
+        set -ex
+        # loostrum/rocm-installer should set up paths correctly.
+        # /opt/rocm/bin should be on PATH.
+        echo "Current PATH: $PATH"
+        echo "Checking for hipcc..."
+        which hipcc
+        hipcc --version
+        echo "Checking for rocminfo..."
+        rocminfo || echo "rocminfo command failed or not found, continuing..."
+        echo "ROCm setup verification complete."
+        echo "Current working directory: $(pwd)"
+        echo "Listing ${{ github.workspace }}/llama.cpp (if exists):"
+        ls -la ${{ github.workspace }}/llama.cpp || echo "llama.cpp directory may not exist or ls failed here."
+
+
+    - name: Verify Vulkan Tools
+      if: matrix.config.backend_name == 'Vulkan'
+      run: |
+        echo "Verifying Vulkan tools..."
+        set -ex
+        vulkaninfo || echo "vulkaninfo command failed or not found (might be okay if only SDK libs are needed for build)"
+        glslc --version || echo "glslc not found/failed"
+        echo "Vulkan tools verification complete."
+
+    - name: Configure llama-server for ${{ matrix.config.backend_name }}
+      id: configure
+      working-directory: ${{ github.workspace }}/llama.cpp
+      run: |
+        echo "Current working directory for configure: $(pwd)"
+        if [ ! -d "${{ github.workspace }}/llama.cpp" ]; then
+          echo "ERROR: ${{ github.workspace }}/llama.cpp does not exist before CMake configuration!"
+          exit 1
         fi
 
-    - name: Get Last Compiled SHA from Artifact
-      id: get_last_sha
-      run: |
-        if [ -f ./.github/last_sha/sha.txt ]; then
-          echo "last_sha=$(cat ./.github/last_sha/sha.txt)" >> "$GITHUB_OUTPUT"
+        echo "Starting CMake configuration for ${{ matrix.config.backend_name }}..."
+        set -ex 
+        CMAKE_COMMON_FLAGS="-DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release"
+        CMAKE_SPECIFIC_FLAGS="${{ matrix.config.cmake_flags }}" # This contains -DGGML_HIP=ON etc.
+        
+        echo "Common CMake flags: $CMAKE_COMMON_FLAGS"
+        echo "Backend-specific CMake flags: $CMAKE_SPECIFIC_FLAGS"
+
+        if [ "${{ matrix.config.backend_name }}" == "ROCm" ]; then
+           if ! command -v hipcc &> /dev/null; then
+             echo "ERROR: hipcc command could not be found. Aborting configuration."
+             exit 1
+           fi
+           
+           ROCM_CLANG_PATH="/opt/rocm/llvm/bin/clang" # Standard path for clang in ROCm toolkit
+           ROCM_CLANGPP_PATH="/opt/rocm/llvm/bin/clang++"
+
+           CMAKE_COMPILER_ARGS=""
+           if [ -f "$ROCM_CLANG_PATH" ] && [ -f "$ROCM_CLANGPP_PATH" ]; then
+                echo "Using ROCm's clang ($ROCM_CLANG_PATH) for C and hipcc for CXX."
+                # hipcc should be used for CXX to handle .hip files and C++ files in a HIP context.
+                # ROCm's clang for plain C files.
+                CMAKE_COMPILER_ARGS="-DCMAKE_C_COMPILER=$ROCM_CLANG_PATH -DCMAKE_CXX_COMPILER=$(which hipcc)"
+           else
+                echo "Warning: ROCm's clang/clang++ not found at $ROCM_CLANG_PATH or $ROCM_CLANGPP_PATH. Using hipcc for CXX and system default for C."
+                CMAKE_COMPILER_ARGS="-DCMAKE_CXX_COMPILER=$(which hipcc)"
+           fi
+           
+           echo "Configuring for ROCm with hipcc at $(which hipcc)"
+           # Combine all flags
+           cmake . -B ./build $CMAKE_COMMON_FLAGS $CMAKE_SPECIFIC_FLAGS $CMAKE_COMPILER_ARGS
+
         else
-          echo "last_sha=" >> "$GITHUB_OUTPUT" # Set to empty if file doesn't exist
+           # For other backends (CUDA, Metal, Vulkan)
+           cmake . -B ./build $CMAKE_COMMON_FLAGS $CMAKE_SPECIFIC_FLAGS
         fi
-
-    - name: Get Current llama.cpp SHA
-      id: get_sha
+        echo "CMake configuration for ${{ matrix.config.backend_name }} complete."
+    - name: List Build Directory After Configure
+      if: always() 
+      working-directory: ${{ github.workspace }}/llama.cpp # Use absolute path
       run: |
-        cd llama.cpp
-        echo "current_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        echo "Current working directory for listing build: $(pwd)"
+        if [ ! -d "${{ github.workspace }}/llama.cpp" ]; then
+          echo "ERROR: ${{ github.workspace }}/llama.cpp no longer exists before listing build dir!"
+          exit 1
+        fi
+        echo "Listing contents of ./build after configure:"
+        ls -la ./build || echo "./build directory does not exist or ls failed"
 
-    - name: Install CURL Development Libraries
+    - name: Build llama-server for ${{ matrix.config.backend_name }}
+      id: build_step
+      working-directory: ${{ github.workspace }}/llama.cpp # Use absolute path
       run: |
-        echo "Installing CURL development libraries..."
-        sudo apt-get update
-        sudo apt-get install -y libcurl4-openssl-dev
-
-    - name: Configure and Build llama-server
-      id: configure_and_build
-      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
-      run: |
-        echo "Configuring and building llama-server..."
-        cd llama.cpp
-        cmake . -B ./build -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=ON -DLLAMA_CURL=ON -DCMAKE_CUDA_ARCHITECTURES="75;80;89"
+        echo "Starting build for ${{ matrix.config.backend_name }}..."
+        set -ex 
         cmake --build ./build --config Release -j $(nproc) --target llama-server
-        echo "llama-server build complete."
+        echo "llama-server build complete for ${{ matrix.config.backend_name }}."
 
-    - name: Move llama-server Binary
-      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
+    - name: List Build Output Bin Directory
+      if: always()
+      working-directory: ${{ github.workspace }} # Check from workspace root
       run: |
-        echo "Moving llama-server binary..."
-        mv llama.cpp/build/bin/llama-server llama-server
-        echo "llama-server binary moved to root directory."
+        echo "Listing contents of llama.cpp/build/bin/ (if it exists):"
+        ls -la llama.cpp/build/bin/ || echo "llama.cpp/build/bin/ does not exist."
 
-    - name: Upload llama-server Artifact
-      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
+    - name: Prepare llama-server Binary for ${{ matrix.config.backend_name }}
+      run: |
+        echo "Preparing binary for ${{ matrix.config.backend_name }}..."
+        set -ex
+        mkdir -p ${{ github.workspace }}/binaries_for_upload
+        
+        BINARY_NAME="llama-server-${{ matrix.config.artifact_name_suffix }}"
+        # SOURCE_PATH is relative to the GITHUB_WORKSPACE (default CWD for this step)
+        SOURCE_PATH="${{ github.workspace }}/llama.cpp/build/bin/llama-server"
+        DEST_PATH="${{ github.workspace }}/binaries_for_upload/$BINARY_NAME"
+        
+        echo "Source: $SOURCE_PATH"
+        echo "Destination: $DEST_PATH"
+
+        if [ -f "$SOURCE_PATH" ]; then
+          echo "Moving $SOURCE_PATH to $DEST_PATH"
+          mv "$SOURCE_PATH" "$DEST_PATH"
+          echo "llama-server binary '$BINARY_NAME' prepared at $DEST_PATH."
+        else
+          echo "ERROR: $SOURCE_PATH not found after build! Cannot prepare binary."
+          exit 1
+        fi
+
+    - name: Verify Binary Before Upload for ${{ matrix.config.backend_name }}
+      run: |
+        set -ex
+        UPLOAD_DIR="${{ github.workspace }}/binaries_for_upload"
+        BINARY_NAME="llama-server-${{ matrix.config.artifact_name_suffix }}"
+        EXPECTED_FILE_PATH="$UPLOAD_DIR/$BINARY_NAME"
+        
+        echo "Verifying existence of $EXPECTED_FILE_PATH before upload..."
+        echo "Listing contents of $UPLOAD_DIR:"
+        ls -la "$UPLOAD_DIR"
+        if [ -f "$EXPECTED_FILE_PATH" ]; then
+          echo "File $EXPECTED_FILE_PATH exists and is ready for upload."
+        else
+          echo "ERROR: File $EXPECTED_FILE_PATH NOT FOUND before upload!"
+          exit 1
+        fi
+
+    - name: Upload llama-server Artifact for ${{ matrix.config.backend_name }}
       uses: actions/upload-artifact@v4
       with:
-        name: llama-server-binary
-        path: llama-server
-    - name: Log Artifact Upload Complete
-      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
-      run: echo "llama-server binary uploaded as artifact."
+        name: llama-server-${{ matrix.config.artifact_name_suffix }}
+        path: binaries_for_upload/llama-server-${{ matrix.config.artifact_name_suffix }}
+        if-no-files-found: error
 
-    - name: Store Last Compiled SHA
-      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
-      run: |
-        mkdir -p ./.github/last_sha
-        echo "${{ steps.get_sha.outputs.current_sha }}" > ./.github/last_sha/sha.txt
-
-    - name: Upload Last Compiled SHA Artifact
-      if: steps.get_sha.outputs.current_sha != steps.get_last_sha.outputs.last_sha
-      uses: actions/upload-artifact@v4
-      with:
-        name: last-compiled-llama-cpp-sha
-        path: ./.github/last_sha/sha.txt
-
-  release:
-    needs: build
-    if: needs.build.outputs.build_successful == 'true'
+  publish_release:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    if: success() && needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
-      - name: Checkout Repository
+      - name: Checkout Workflow Repository
         uses: actions/checkout@v4
 
-      - name: Delete Previous Releases and Tags
+      - name: Log Release Variables
+        run: |
+          echo "Current SHA for release: ${{ needs.prepare.outputs.current_sha }}"
+          echo "Tag Name: ${{ needs.prepare.outputs.tag_name }}"
+          echo "Release Name: ${{ needs.prepare.outputs.release_name }}"
+
+      - name: Clean up old releases (optional)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_TAG_PREFIX: "llama-server-"
+          CURRENT_RELEASE_TAG: ${{ needs.prepare.outputs.tag_name }}
         run: |
-          echo "Deleting previous releases and tags..."
-          gh release list --limit 100 --json tagName --jq '.[].tagName' | while read -r tag; do
-            if [[ "$tag" == llama-server-* ]]; then
-              echo "Deleting release $tag..."
-              gh release delete "$tag" --yes
-              
-              echo "Deleting tag $tag..."
-              git push --delete origin "$tag"
+          echo "Current release tag target: $CURRENT_RELEASE_TAG"
+          gh release list --limit 30 --json tagName --jq ".[] | .tagName" | while IFS= read -r tag; do
+            if [[ "$tag" == $CURRENT_TAG_PREFIX* && "$tag" != "$CURRENT_RELEASE_TAG" ]]; then
+              echo "Deleting old release associated with tag: $tag"
+              gh release delete "$tag" -y --cleanup-tag || echo "Warning: Failed to delete release or tag $tag. It might not exist or permissions issue."
             fi
           done
 
-      - name: Download llama-server Binary
+      - name: Download all llama-server artifacts
         uses: actions/download-artifact@v4
         with:
-          name: llama-server-binary
-          path: .
+          path: release-assets/ 
+
+      - name: Prepare Release Assets
+        id: prep_assets
+        run: |
+          echo "Listing downloaded artifacts structure:"
+          ls -R release-assets/
+          mkdir -p final-release-assets
+          
+          find release-assets -type f -path '*/llama-server-*' -print -exec cp {} final-release-assets/ \;
+
+          echo "Listing final assets in final-release-assets/:"
+          ls -l final-release-assets/
+          if [ -z "$(ls -A final-release-assets)" ]; then
+            echo "No build artifacts found in final-release-assets. Skipping release creation."
+            echo "assets_found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Build artifacts found. Proceeding with release."
+            echo "assets_found=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        if: steps.prep_assets.outputs.assets_found == 'true'
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: llama-server-${{ needs.build.outputs.current_llama_sha }}
-          name: Llama Server Build ${{ needs.build.outputs.current_llama_sha }}
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          name: ${{ needs.prepare.outputs.release_name }}
           body: |
-            Automated build of llama-server from llama.cpp commit:
-            https://github.com/ggerganov/llama.cpp/commit/${{ needs.build.outputs.current_llama_sha }}
+            Automated multi-backend build of llama-server from llama.cpp commit:
+            https://github.com/ggerganov/llama.cpp/commit/${{ needs.prepare.outputs.current_sha }}
+
+            Compiled llama-server binaries for various backends are attached.
           files: |
-            llama-server
+            final-release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Store Last Released SHA (if release was successful)
+        if: steps.prep_assets.outputs.assets_found == 'true'
+        run: |
+          mkdir -p ./.github/last_sha
+          echo "${{ needs.prepare.outputs.current_sha }}" > ./.github/last_sha/sha.txt
+          echo "Stored ${{ needs.prepare.outputs.current_sha }} as last released SHA."
+
+      - name: Upload Last Released SHA Artifact (if release was successful)
+        if: steps.prep_assets.outputs.assets_found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-released-llama-cpp-sha
+          path: ./.github/last_sha/sha.txt
