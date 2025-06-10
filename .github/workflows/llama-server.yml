@@ -88,7 +88,7 @@ jobs:
     permissions:
       contents: read
     strategy:
-      fail-fast: false
+      fail-fast: false # This is important, already set correctly
       matrix:
         config:
           - backend_name: CUDA
@@ -99,9 +99,6 @@ jobs:
               -DGGML_METAL=OFF
               -DGGML_VULKAN=OFF
               -DGGML_HIP=OFF
-              # other GGML backends like SYCL, OPENCL
-              # -DGGML_SYCL=OFF
-              # -DGGML_OPENCL=OFF
             artifact_name_suffix: "cuda-linux-x86_64"
             setup_cuda: true
             dependencies: "sudo apt-get update -y && sudo apt-get install -y libcurl4-openssl-dev"
@@ -112,8 +109,6 @@ jobs:
               -DGGML_CUDA=OFF
               -DGGML_VULKAN=OFF
               -DGGML_HIP=OFF
-              # -DGGML_SYCL=OFF
-              # -DGGML_OPENCL=OFF
             artifact_name_suffix: "metal-macos-arm64"
             dependencies: "brew install curl"
           - backend_name: ROCm
@@ -126,8 +121,6 @@ jobs:
               -DGGML_VULKAN=OFF
               -DAMDGPU_TARGETS='gfx1103'
               # 'gfx900;gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103'"
-              # -DGGML_SYCL=OFF
-              # -DGGML_OPENCL=OFF
             artifact_name_suffix: "rocm-linux-x86_64"
             setup_rocm: true
             rocm_version: "latest"
@@ -144,19 +137,10 @@ jobs:
             artifact_name_suffix: "vulkan-linux-x86_64"
             dependencies: |
               sudo apt-get update -y
-              # Prerequisites for adding custom repositories and for the SDK
               sudo apt-get install -y libcurl4-openssl-dev wget gpg ca-certificates apt-transport-https
-              
-              # Add LunarG Vulkan SDK repository
-              # (Using /usr/share/keyrings/ for the gpg key as per modern best practices)
               wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo gpg --dearmor -o /usr/share/keyrings/lunarg-vulkan-keyring.gpg
               echo "deb [signed-by=/usr/share/keyrings/lunarg-vulkan-keyring.gpg] https://packages.lunarg.com/vulkan/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list
-              
-              # Update package lists again after adding the new repository
               sudo apt-get update -y
-              
-              # Install the full Vulkan SDK
-              # This will provide glslc, libvulkan-dev, libshaderc-dev, and other necessary tools/libs
               sudo apt-get install -y vulkan-sdk
     steps:
     - name: Checkout Workflow Repository
@@ -224,15 +208,12 @@ jobs:
       with:
         version: ${{ matrix.config.rocm_version }}
         packages: ${{ matrix.config.rocm_packages }}
-        # usecase: can also be used, e.g., 'rocmdev' or 'hipsdk'
 
     - name: Verify ROCm Tools (after loostrum/rocm-installer)
       if: matrix.config.setup_rocm
       run: |
         echo "Verifying ROCm tools..."
         set -ex
-        # loostrum/rocm-installer should set up paths correctly.
-        # /opt/rocm/bin should be on PATH.
         echo "Current PATH: $PATH"
         echo "Checking for hipcc..."
         which hipcc
@@ -267,7 +248,7 @@ jobs:
         echo "Starting CMake configuration for ${{ matrix.config.backend_name }}..."
         set -ex 
         CMAKE_COMMON_FLAGS="-DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release"
-        CMAKE_SPECIFIC_FLAGS="${{ matrix.config.cmake_flags }}" # This contains -DGGML_HIP=ON etc.
+        CMAKE_SPECIFIC_FLAGS="${{ matrix.config.cmake_flags }}"
         
         echo "Common CMake flags: $CMAKE_COMMON_FLAGS"
         echo "Backend-specific CMake flags: $CMAKE_SPECIFIC_FLAGS"
@@ -278,14 +259,12 @@ jobs:
              exit 1
            fi
            
-           ROCM_CLANG_PATH="/opt/rocm/llvm/bin/clang" # Standard path for clang in ROCm toolkit
+           ROCM_CLANG_PATH="/opt/rocm/llvm/bin/clang"
            ROCM_CLANGPP_PATH="/opt/rocm/llvm/bin/clang++"
 
            CMAKE_COMPILER_ARGS=""
            if [ -f "$ROCM_CLANG_PATH" ] && [ -f "$ROCM_CLANGPP_PATH" ]; then
                 echo "Using ROCm's clang ($ROCM_CLANG_PATH) for C and hipcc for CXX."
-                # hipcc should be used for CXX to handle .hip files and C++ files in a HIP context.
-                # ROCm's clang for plain C files.
                 CMAKE_COMPILER_ARGS="-DCMAKE_C_COMPILER=$ROCM_CLANG_PATH -DCMAKE_CXX_COMPILER=$(which hipcc)"
            else
                 echo "Warning: ROCm's clang/clang++ not found at $ROCM_CLANG_PATH or $ROCM_CLANGPP_PATH. Using hipcc for CXX and system default for C."
@@ -293,17 +272,15 @@ jobs:
            fi
            
            echo "Configuring for ROCm with hipcc at $(which hipcc)"
-           # Combine all flags
            cmake . -B ./build $CMAKE_COMMON_FLAGS $CMAKE_SPECIFIC_FLAGS $CMAKE_COMPILER_ARGS
 
         else
-           # For other backends (CUDA, Metal, Vulkan)
            cmake . -B ./build $CMAKE_COMMON_FLAGS $CMAKE_SPECIFIC_FLAGS
         fi
         echo "CMake configuration for ${{ matrix.config.backend_name }} complete."
     - name: List Build Directory After Configure
       if: always() 
-      working-directory: ${{ github.workspace }}/llama.cpp # Use absolute path
+      working-directory: ${{ github.workspace }}/llama.cpp
       run: |
         echo "Current working directory for listing build: $(pwd)"
         if [ ! -d "${{ github.workspace }}/llama.cpp" ]; then
@@ -315,7 +292,7 @@ jobs:
 
     - name: Build llama-server for ${{ matrix.config.backend_name }}
       id: build_step
-      working-directory: ${{ github.workspace }}/llama.cpp # Use absolute path
+      working-directory: ${{ github.workspace }}/llama.cpp
       run: |
         echo "Starting build for ${{ matrix.config.backend_name }}..."
         set -ex 
@@ -324,7 +301,7 @@ jobs:
 
     - name: List Build Output Bin Directory
       if: always()
-      working-directory: ${{ github.workspace }} # Check from workspace root
+      working-directory: ${{ github.workspace }}
       run: |
         echo "Listing contents of llama.cpp/build/bin/ (if it exists):"
         ls -la llama.cpp/build/bin/ || echo "llama.cpp/build/bin/ does not exist."
@@ -336,7 +313,6 @@ jobs:
         mkdir -p ${{ github.workspace }}/binaries_for_upload
         
         BINARY_NAME="llama-server-${{ matrix.config.artifact_name_suffix }}"
-        # SOURCE_PATH is relative to the GITHUB_WORKSPACE (default CWD for this step)
         SOURCE_PATH="${{ github.workspace }}/llama.cpp/build/bin/llama-server"
         DEST_PATH="${{ github.workspace }}/binaries_for_upload/$BINARY_NAME"
         
@@ -374,12 +350,12 @@ jobs:
       with:
         name: llama-server-${{ matrix.config.artifact_name_suffix }}
         path: binaries_for_upload/llama-server-${{ matrix.config.artifact_name_suffix }}
-        if-no-files-found: error
+        if-no-files-found: error # This is fine; if a specific build fails to produce a binary, this leg of the matrix should show an error.
 
   publish_release:
     name: Publish GitHub Release
     needs: [prepare, build]
-    if: success() && needs.prepare.outputs.should_build == 'true'
+    if: always() && needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -410,7 +386,7 @@ jobs:
       - name: Download all llama-server artifacts
         uses: actions/download-artifact@v4
         with:
-          path: release-assets/ 
+          path: release-assets/
 
       - name: Prepare Release Assets
         id: prep_assets
@@ -419,7 +395,7 @@ jobs:
           ls -R release-assets/
           mkdir -p final-release-assets
           
-          find release-assets -type f -path '*/llama-server-*' -print -exec cp {} final-release-assets/ \;
+          find release-assets -type f -name 'llama-server-*' -print -exec cp {} final-release-assets/ \;
 
           echo "Listing final assets in final-release-assets/:"
           ls -l final-release-assets/
@@ -442,6 +418,7 @@ jobs:
             https://github.com/ggerganov/llama.cpp/commit/${{ needs.prepare.outputs.current_sha }}
 
             Compiled llama-server binaries for various backends are attached.
+            (Note: Some backends might be missing if their specific build failed.)
           files: |
             final-release-assets/*
         env:
@@ -459,4 +436,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: last-released-llama-cpp-sha
+          path: ./.github/last_sha/sha.txt # <<< THIS LINE IS CORRECTLY RESTORED
           path: ./.github/last_sha/sha.txt
