@@ -436,5 +436,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: last-released-llama-cpp-sha
-          path: ./.github/last_sha/sha.txt # <<< THIS LINE IS CORRECTLY RESTORED
           path: ./.github/last_sha/sha.txt
