@@ -93,27 +93,54 @@ jobs:
         config:
           - backend_name: CUDA
             os_runner: ubuntu-22.04
-            cmake_flags: "-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES='75;80;89'"
+            cmake_flags: >-
+              -DGGML_CUDA=ON
+              -DCMAKE_CUDA_ARCHITECTURES='75;80;89'
+              -DGGML_METAL=OFF
+              -DGGML_VULKAN=OFF
+              -DGGML_HIP=OFF
+              # other GGML backends like SYCL, OPENCL
+              # -DGGML_SYCL=OFF
+              # -DGGML_OPENCL=OFF
             artifact_name_suffix: "cuda-linux-x86_64"
             setup_cuda: true
             dependencies: "sudo apt-get update -y && sudo apt-get install -y libcurl4-openssl-dev"
           - backend_name: Metal
             os_runner: macos-14
-            cmake_flags: "-DGGML_METAL=ON"
+            cmake_flags: >-
+              -DGGML_METAL=ON
+              -DGGML_CUDA=OFF
+              -DGGML_VULKAN=OFF
+              -DGGML_HIP=OFF
+              # -DGGML_SYCL=OFF
+              # -DGGML_OPENCL=OFF
             artifact_name_suffix: "metal-macos-arm64"
             dependencies: "brew install curl"
           - backend_name: ROCm
             os_runner: ubuntu-22.04
-            cmake_flags: "-DGGML_HIP=ON -DAMDGPU_TARGETS='gfx1103' # 'gfx900;gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103'"
+            cmake_flags: >-
+              -DGGML_HIP=ON
+              -DAMDGPU_TARGETS='gfx1103'
+              -DGGML_CUDA=OFF
+              -DGGML_METAL=OFF
+              -DGGML_VULKAN=OFF
+              -DAMDGPU_TARGETS='gfx1103'
+              # 'gfx900;gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103'"
+              # -DGGML_SYCL=OFF
+              # -DGGML_OPENCL=OFF
             artifact_name_suffix: "rocm-linux-x86_64"
             setup_rocm: true
-            rocm_version: "latest" 
-            rocm_packages: "rocm-hip-sdk rocm-cmake" 
+            rocm_version: "latest"
+            rocm_packages: "rocm-hip-sdk rocm-cmake"
             dependencies: "sudo apt-get update -y && sudo apt-get install -y libcurl4-openssl-dev"
 
           - backend_name: Vulkan
             os_runner: ubuntu-22.04
-            cmake_flags: "-DGGML_VULKAN=ON"
+            cmake_flags: >-
+              -DGGML_VULKAN=ON
+              -DGGML_CUDA=OFF
+              -DGGML_METAL=OFF
+              -DGGML_HIP=OFF
             artifact_name_suffix: "vulkan-linux-x86_64"
             dependencies: |
               sudo apt-get update -y
