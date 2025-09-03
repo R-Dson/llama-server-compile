@@ -247,7 +247,7 @@ jobs:
 
         echo "Starting CMake configuration for ${{ matrix.config.backend_name }}..."
         set -ex 
-        CMAKE_COMMON_FLAGS="-DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release"
+        CMAKE_COMMON_FLAGS="-DGGML_CUDA_FA_ALL_QUANTS=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release"
         CMAKE_SPECIFIC_FLAGS="${{ matrix.config.cmake_flags }}"
         
         echo "Common CMake flags: $CMAKE_COMMON_FLAGS"
